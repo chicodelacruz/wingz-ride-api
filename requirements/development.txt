@@ -1,0 +1,7 @@
+-r common.txt
+
+pytest>=8.3
+pytest-django>=4.9
+black>=24.10
+flake8>=7.1
+ipython

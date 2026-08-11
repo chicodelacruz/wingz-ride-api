@@ -1,0 +1,15 @@
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+extend-exclude = '''
+/(
+    migrations
+  | venv
+)/
+'''
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "wingz.settings.test"
+python_files = ["tests.py", "test_*.py"]
+addopts = "--no-migrations --create-db -ra"
+testpaths = ["wingz"]
