@@ -154,8 +154,59 @@ Returns `access` and `refresh` tokens. Send the access token as
 | --- | --- | --- |
 | `POST` | `/api/auth/token/` | Obtain an access/refresh token pair |
 | `POST` | `/api/auth/token/refresh/` | Exchange a refresh token for a new access token |
+| `GET` | `/api/rides/` | Paginated ride list, with nested rider, driver and recent events |
+| `POST` | `/api/rides/` | Create a ride |
+| `GET` | `/api/rides/{id}/` | Retrieve a single ride |
+| `PUT` / `PATCH` | `/api/rides/{id}/` | Update a ride |
+| `DELETE` | `/api/rides/{id}/` | Delete a ride |
 
-Ride endpoints are documented in the section below as they are implemented.
+### Ride list
+
+```bash
+curl http://127.0.0.1:9094/api/rides/ \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Each ride carries its rider and driver as nested objects and a `todays_ride_events`
+list holding only the events from the last 24 hours:
+
+```json
+{
+  "count": 120,
+  "next": "http://127.0.0.1:9094/api/rides/?page=2",
+  "previous": null,
+  "results": [
+    {
+      "id_ride": 41,
+      "status": "en-route",
+      "id_rider": {
+        "id_user": 7,
+        "role": "rider",
+        "first_name": "Ada",
+        "last_name": "Reyes",
+        "email": "ada@example.com",
+        "phone_number": "+63..."
+      },
+      "id_driver": { "id_user": 9, "role": "driver", "...": "..." },
+      "pickup_latitude": 14.5995,
+      "pickup_longitude": 120.9842,
+      "dropoff_latitude": 14.5547,
+      "dropoff_longitude": 121.0244,
+      "pickup_time": "2026-08-12T09:15:00Z",
+      "todays_ride_events": [
+        {
+          "id_ride_event": 88,
+          "id_ride": 41,
+          "description": "Status changed to pickup",
+          "created_at": "2026-08-12T09:20:11Z"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Page size defaults to 25 and can be set per request with `?page_size=`, capped at 100.
 
 ---
 
@@ -212,6 +263,59 @@ That last one is worth explaining. Django compiles `iexact` to
 the SQL the ORM actually emits, which was confirmed by inspecting the generated query
 rather than assumed.
 
+**The ride list costs a fixed number of queries.**
+This is the requirement most easily broken by accident, so it is worth spelling out
+what the endpoint actually issues. For a page of any size:
+
+```sql
+-- 1. authentication: resolve the caller from the JWT (before the view runs)
+SELECT ... FROM "user" WHERE "user"."id_user" = 1;
+
+-- 2. pagination count
+SELECT COUNT(*) AS "__count" FROM "ride";
+
+-- 3. the page of rides, with rider and driver joined in
+SELECT "ride".*, "user".*, T3.*
+FROM "ride"
+  INNER JOIN "user" ON ("ride"."id_rider" = "user"."id_user")
+  INNER JOIN "user" T3 ON ("ride"."id_driver" = T3."id_user")
+ORDER BY "ride"."pickup_time" DESC, "ride"."id_ride" DESC
+LIMIT 25;
+
+-- 4. the recent events for exactly those rides, in one statement
+SELECT ... FROM "ride_event"
+WHERE "ride_event"."created_at" >= %s
+  AND "ride_event"."id_ride" IN (...);
+```
+
+That is the two queries the specification asks for, plus the pagination `COUNT`, plus
+authentication — which happens before the view is reached and is not part of building
+the list.
+
+The mechanism is `select_related` for the two participant foreign keys and a
+`Prefetch(..., to_attr="todays_ride_events")` for the events. `to_attr` is doing the
+important work: it attaches the filtered events to each ride as an ordinary list, so
+the serializer performs an attribute access. The natural-looking alternative — a
+`SerializerMethodField` that filters `obj.ride_events` — produces identical JSON and
+one extra query per ride.
+
+Two tests protect this. One asserts the exact count, and one asserts the count is
+unchanged when the result set grows tenfold. The second matters more: a hardcoded
+number can be made to pass by adjusting a fixture, whereas a count that stays flat as
+rows multiply cannot.
+
+**Read and write use different serializers.**
+Writes accept participant ids rather than nested objects, and a newly created ride has
+no `todays_ride_events` attribute, because the prefetch that supplies it only runs on
+list and retrieve. Reusing the read serializer for `POST` responses would raise
+`AttributeError` on every successful create.
+
+**The list has an explicit total ordering.**
+PostgreSQL makes no ordering guarantee without `ORDER BY`, so paginating an unordered
+queryset can show a row on two pages or skip it entirely. The ordering is
+`(-pickup_time, -id_ride)`; the id tiebreaker is required because `pickup_time` is not
+unique.
+
 **`ATOMIC_REQUESTS` is enabled, which complicates query counting.**
 Each request runs in a transaction, so a failed write leaves nothing half-applied.
 The side effect is that Django's `assertNumQueries` counts the `SAVEPOINT` and
@@ -229,9 +333,9 @@ the requirement.
 - [x] `User`, `Ride`, `RideEvent` models with spec-conformant columns and indexes
 - [x] JWT authentication and admin-role authorisation
 - [x] Test harness, linting, query-counting helper
-- [ ] Serializers and ViewSets for CRUD
-- [ ] Ride list endpoint with nested rider, driver, and events
-- [ ] `todays_ride_events` via filtered prefetch, within the query budget
+- [x] Serializers and ViewSets for CRUD
+- [x] Ride list endpoint with nested rider, driver, and events
+- [x] `todays_ride_events` via filtered prefetch, within the query budget
 - [ ] Filtering by status and rider email
 - [ ] Sorting by pickup time and by distance from a given point
 - [ ] Reporting SQL for trips longer than one hour
