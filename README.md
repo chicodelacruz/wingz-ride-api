@@ -63,6 +63,9 @@ createdb wingz
 ./venv/bin/python manage.py migrate
 ```
 
+If either of those complains, [If something goes wrong](#if-something-goes-wrong) has
+the usual causes.
+
 **5. Make an admin user**
 
 Every endpoint needs a user whose `role` is `admin`, so you have to do this before the
@@ -106,6 +109,61 @@ Two easy ways to poke at it:
   listed underneath it
 - `http://127.0.0.1:9094/api/rides/` — the DRF browsable API, which works in the
   browser once you're logged into the admin
+
+---
+
+## If something goes wrong
+
+I've only run this on macOS with Homebrew Postgres, so here are the things most likely
+to trip you up somewhere else, with what the error actually looks like.
+
+**`FATAL: role "postgres" does not exist`**
+
+The `WINGZ_DB_USER` in your `.env` doesn't exist in your Postgres. With Homebrew the
+superuser is your own Mac username, not `postgres`, so:
+
+```bash
+WINGZ_DB_USER=$(whoami)
+```
+
+`.env.example` ships `postgres` because that's the usual name on Linux and in Docker
+images. If you're on a Mac, this is the line to change.
+
+**`FATAL: database "wingz" does not exist`**
+
+You skipped `createdb wingz`, or your `WINGZ_DB_NAME` doesn't match what you created.
+
+**`could not receive data from server: Connection refused`**
+
+Postgres isn't running, or it's not on the port in your `.env`. Check with
+`pg_isready`. On Homebrew: `brew services start postgresql@18`.
+
+**`FATAL: password authentication failed`**
+
+Your Postgres wants a password. Put it in `WINGZ_DB_PASSWORD` — it's empty by default,
+which works for local trust or peer auth but not much else.
+
+**Tests fail while creating a database**
+
+pytest builds its own test database, so your database user needs `CREATEDB`. Either
+grant it (`ALTER ROLE youruser CREATEDB;`) or use a superuser locally.
+
+**`{"detail": "This endpoint is restricted to users with the 'admin' role."}`**
+
+Your token belongs to a real user who isn't an admin. Every endpoint needs
+`role = 'admin'`. `createsuperuser` sets that for you; `seed_demo_data` prints an admin
+login you can use.
+
+**`createsuperuser` isn't asking for a username**
+
+It shouldn't. It asks for email, first name, last name and a password, because the User
+table in the spec has no username column and email is the login field.
+
+**You're on Windows**
+
+Every command here uses `./venv/bin/python`, which is the Unix layout. Use
+`venv\Scripts\python` instead. Everything else works the same — `psycopg[binary]` ships
+prebuilt wheels, so there's nothing to compile.
 
 ---
 
