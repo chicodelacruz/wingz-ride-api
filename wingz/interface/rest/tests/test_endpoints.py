@@ -131,3 +131,31 @@ class TestRideEventEndpoint:
         response = authenticate(make_user(role=User.Role.DRIVER)).get(reverse("rideevent-list"))
 
         assert response.status_code == 403
+
+    def test_full_history_for_one_ride_is_reachable(self, admin_client, make_ride, make_ride_event):
+        """The ride list carries only 24 hours of events; everything else lives here.
+
+        Without this the older history would be unreachable through the API, which
+        would make the ride list's 24-hour window a loss of data rather than a
+        deliberately bounded view of it.
+        """
+        ride = make_ride()
+        other_ride = make_ride()
+        make_ride_event(ride, description="recent", hours_ago=1)
+        make_ride_event(ride, description="last week", hours_ago=24 * 7)
+        make_ride_event(ride, description="last year", hours_ago=24 * 365)
+        make_ride_event(other_ride, description="different ride", hours_ago=2)
+
+        response = admin_client.get(reverse("rideevent-list"), {"id_ride": ride.id_ride})
+        descriptions = {event["description"] for event in response.data["results"]}
+
+        assert descriptions == {"recent", "last week", "last year"}
+
+    def test_events_can_be_filtered_by_description(self, admin_client, make_ride, make_ride_event):
+        ride = make_ride()
+        make_ride_event(ride, description="Status changed to pickup", hours_ago=2)
+        make_ride_event(ride, description="Route recalculated", hours_ago=1)
+
+        response = admin_client.get(reverse("rideevent-list"), {"description": "Status changed to pickup"})
+
+        assert response.data["count"] == 1

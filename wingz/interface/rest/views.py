@@ -92,7 +92,14 @@ class RideEventViewSet(viewsets.ModelViewSet):
     The list is ordered newest first, which is the useful default for an event log,
     with the primary key as a tiebreaker since events recorded in the same instant
     would otherwise have no defined order.
+
+    Filtering by `id_ride` is what makes a ride's complete history reachable. The ride
+    list deliberately carries only the last 24 hours of events, since loading every
+    event for every ride is the thing the performance requirement forbids — so the full
+    history lives here, paginated, where asking for it is explicit and bounded to one
+    ride.
     """
 
     serializer_class = RideEventSerializer
     queryset = RideEvent.objects.select_related("id_ride").order_by("-created_at", "-id_ride_event")
+    filterset_fields = ["id_ride", "description"]
