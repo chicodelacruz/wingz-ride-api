@@ -91,6 +91,7 @@ class RideReadSerializer(serializers.ModelSerializer):
     id_rider = RideUserSerializer(read_only=True)
     id_driver = RideUserSerializer(read_only=True)
     todays_ride_events = RideEventSerializer(many=True, read_only=True)
+    distance_km = serializers.SerializerMethodField()
 
     class Meta:
         model = Ride
@@ -105,8 +106,28 @@ class RideReadSerializer(serializers.ModelSerializer):
             "dropoff_longitude",
             "pickup_time",
             "todays_ride_events",
+            "distance_km",
         ]
         read_only_fields = fields
+
+    def get_distance_km(self, obj):
+        """Distance from the point supplied when ordering by distance.
+
+        Read from the annotation with getattr, so this stays an attribute access and
+        costs no query. Absent unless the request asked for a distance ordering.
+        """
+        distance = getattr(obj, "distance_km", None)
+        return None if distance is None else round(distance, 3)
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+
+        # Only meaningful when the request supplied a point to measure from. Omitting
+        # it entirely is clearer than returning null on every ordinary list request.
+        if representation.get("distance_km") is None:
+            representation.pop("distance_km", None)
+
+        return representation
 
 
 class RideWriteSerializer(serializers.ModelSerializer):

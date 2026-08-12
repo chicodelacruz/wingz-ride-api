@@ -2,7 +2,10 @@ from datetime import timedelta
 
 from django.db.models import Prefetch
 from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets
+
+from wingz.interface.rest.filters import RideFilter, RideOrderingFilter
 
 from wingz.domain.core.models import User
 from wingz.domain.rides.models import Ride, RideEvent
@@ -33,6 +36,8 @@ class RideViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = RideReadSerializer
+    filter_backends = [DjangoFilterBackend, RideOrderingFilter]
+    filterset_class = RideFilter
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):

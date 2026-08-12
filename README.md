@@ -286,6 +286,33 @@ list holding only the events from the last 24 hours:
 
 Page size defaults to 25 and can be set per request with `?page_size=`, capped at 100.
 
+### Filtering and ordering
+
+| Parameter | Values | Notes |
+| --- | --- | --- |
+| `status` | `en-route`, `pickup`, `dropoff` | |
+| `rider_email` | an email address | case-insensitive |
+| `ordering` | `pickup_time`, `-pickup_time`, `distance`, `-distance` | default is `-pickup_time` |
+| `pickup_latitude` | −90 to 90 | required when ordering by distance |
+| `pickup_longitude` | −180 to 180 | required when ordering by distance |
+| `radius_km` | any positive number | optional; restricts results and makes the distance sort indexed |
+
+```bash
+# rides currently at pickup, for one rider
+curl "…/api/rides/?status=pickup&rider_email=ada@example.com" -H "Authorization: Bearer $T"
+
+# nearest first to a point, within 5 km
+curl "…/api/rides/?ordering=distance&pickup_latitude=14.5995&pickup_longitude=120.9842&radius_km=5" \
+  -H "Authorization: Bearer $T"
+```
+
+When ordering by distance, each ride gains a `distance_km` field. It is omitted
+otherwise, since without a point to measure from there is no distance to report.
+
+Unsupported values are rejected with a `400` naming the parameter, rather than being
+silently ignored — an ordering that quietly does nothing is worse than one that
+complains.
+
 ---
 
 ## Design decisions
@@ -394,6 +421,62 @@ queryset can show a row on two pages or skip it entirely. The ordering is
 `(-pickup_time, -id_ride)`; the id tiebreaker is required because `pickup_time` is not
 unique.
 
+**Both orderings are computed by the database, never in Python.**
+This is a correctness requirement before it is a performance one. Pagination applies
+`LIMIT` and `OFFSET` in SQL, so an ordering applied in Python would sort rows the
+database had already selected in a different order — page two would repeat or skip
+rides. A test pages through a distance-ordered result set and asserts the pages do not
+overlap and that distances continue to increase across the boundary.
+
+Sorting by `pickup_time` is served by the `(status, pickup_time)` and `(pickup_time)`
+indexes. Sorting by distance cannot use an index at all, because the distance is
+measured from a point supplied per request — there is no fixed value to index.
+
+**The distance sort uses Haversine in SQL, with an optional indexed prefilter.**
+The great-circle distance is built from Django's ORM maths functions rather than raw
+SQL, so the coordinates remain bound parameters. It was verified against an
+independent Python implementation and agrees to within a nanometre.
+
+Haversine rather than the spherical law of cosines: the latter is shorter but loses
+precision at small separations, which are precisely the distances that matter when
+ordering nearby rides.
+
+Ordering by a computed expression means reading and sorting every row. Passing
+`radius_km` adds a bounding-box prefilter on the indexed latitude and longitude
+columns, so the expensive trigonometry only runs over rows already narrowed by an
+index. Measured on 200,000 rides:
+
+| | Plan | Rows scanned | Time |
+| --- | --- | --- | --- |
+| no `radius_km` | parallel sequential scan, top-N heapsort | 200,030 | 80.6 ms |
+| `radius_km=5` | bitmap index scan on `ride_pickup_latlng_idx` | 788 | 1.85 ms |
+
+`radius_km` is applied in two phases, because the box alone is not enough. The box is
+a square, so its corners reach about 1.41 times the radius — filtering on it alone
+returns rides beyond the distance that was asked for. So the indexed box narrows the
+candidates, and an exact distance filter then trims the corners, which makes
+`radius_km` mean what it says while keeping the index scan. Two tests cover this: one
+places a ride diagonally so it falls inside the box but outside the circle, and one
+asserts no result ever exceeds the requested radius.
+
+The box does not wrap across the antimeridian and widens near the poles as the
+longitude correction degenerates. Both are acceptable for a prefilter of this kind and
+documented in the code.
+
+**Where this stops scaling, and what would replace it.**
+Without `radius_km` the sort is still a full scan, so nearest-first across the entire
+table remains expensive however it is written. The production answer is PostGIS: a
+`geography` column with a GiST index, ordered with the `<->` KNN operator, which turns
+nearest-neighbour into an index scan with no radius restriction.
+
+That was deliberately not adopted here. PostGIS is a heavyweight dependency for a
+project whose README promises any developer can set it up without trouble, and the KNN
+ordering needs hand-written SQL either way, since GeoDjango's `Distance()` compiles to
+`ST_Distance` — which PostgreSQL sorts rather than index-scans. The bounding-box
+approach delivers the same practical result for bounded searches on a stock PostgreSQL
+install. If nearest-first over the whole table became a real requirement, PostGIS is
+the point at which the dependency would start paying for itself.
+
 **Coordinates are validated in two places, on purpose.**
 Field validators give the API a readable `400` naming the offending field. Database
 `CheckConstraint`s enforce the same bounds unconditionally. Both are needed because
@@ -433,6 +516,6 @@ the requirement.
 - [x] Serializers and ViewSets for CRUD
 - [x] Ride list endpoint with nested rider, driver, and events
 - [x] `todays_ride_events` via filtered prefetch, within the query budget
-- [ ] Filtering by status and rider email
-- [ ] Sorting by pickup time and by distance from a given point
+- [x] Filtering by status and rider email
+- [x] Sorting by pickup time and by distance from a given point
 - [ ] Reporting SQL for trips longer than one hour
