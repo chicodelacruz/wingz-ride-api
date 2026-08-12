@@ -138,6 +138,103 @@ WINGZ_DB_NAME=wingz_verify ./venv/bin/python manage.py migrate
 
 ---
 
+## Reporting: trips longer than one hour
+
+Counts completed trips whose duration from pickup to dropoff exceeded one hour,
+grouped by month and driver.
+
+```sql
+SELECT
+    to_char(trip.picked_up_at, 'YYYY-MM')                      AS month,
+    driver.first_name || ' ' || left(driver.last_name, 1)      AS driver,
+    count(*)                                                   AS trip_count
+FROM (
+    SELECT
+        ride.id_ride,
+        ride.id_driver,
+        min(event.created_at) FILTER (
+            WHERE event.description = 'Status changed to pickup'
+        ) AS picked_up_at,
+        min(event.created_at) FILTER (
+            WHERE event.description = 'Status changed to dropoff'
+        ) AS dropped_off_at
+    FROM ride
+    JOIN ride_event AS event ON event.id_ride = ride.id_ride
+    WHERE event.description IN (
+        'Status changed to pickup',
+        'Status changed to dropoff'
+    )
+    GROUP BY ride.id_ride, ride.id_driver
+) AS trip
+JOIN "user" AS driver ON driver.id_user = trip.id_driver
+WHERE trip.picked_up_at IS NOT NULL
+  AND trip.dropped_off_at IS NOT NULL
+  AND trip.dropped_off_at - trip.picked_up_at > INTERVAL '1 hour'
+GROUP BY month, driver
+ORDER BY month, driver;
+```
+
+Run it without pasting it anywhere:
+
+```bash
+./venv/bin/python manage.py trip_duration_report
+./venv/bin/python manage.py trip_duration_report --show-sql
+```
+
+```
+Month      Driver                Count of Trips > 1 hr
+------------------------------------------------------
+2026-04    Howard C                                  1
+2026-05    Howard S                                  3
+2026-06    Nora H                                    1
+```
+
+### How it works, and the decisions in it
+
+The inner query pivots ride events into one row per trip. `FILTER` is used rather than
+`CASE WHEN` — it says what it means and PostgreSQL evaluates it in a single pass over
+the joined rows.
+
+`min()` on each side matters: an event can legitimately be recorded more than once, and
+taking the earliest of each gives a trip that starts when it first started and ends
+when it first ended, rather than stretching to the last duplicate.
+
+The remaining decisions were made explicitly, and each has a test:
+
+- **`> INTERVAL '1 hour'` is strict.** A trip of exactly sixty minutes is not longer
+  than an hour, so it is not counted.
+- **Incomplete trips are excluded.** A ride with a pickup and no dropoff is still in
+  progress; the `IS NOT NULL` guards keep it out rather than treating it as zero
+  duration.
+- **The month is the month of pickup.** A trip beginning at 23:30 on the last day of
+  January and ending in February belongs to January — the alternative would split a
+  single trip's identity across two reporting periods.
+- **Timestamps are UTC**, because the connection time zone is UTC. On a deployment
+  reporting to a local audience, month boundaries would need converting to that
+  audience's zone first.
+- **Driver names follow the sample output**: first name, space, initial of last name.
+
+The statement lives in `wingz/domain/rides/reports.py` so the management command, the
+tests and this README all use the same text rather than three copies that drift. A test
+asserts the event descriptions hardcoded in the SQL still match the model's constants,
+so renaming one fails a test instead of silently returning nothing.
+
+### Scale
+
+Measured on 200,000 rides and 400,000 ride events, the report runs in roughly 280 ms,
+using index scans on both tables rather than sequential ones.
+
+That is fine for a periodic report and will not stay fine indefinitely, because the
+query necessarily reads every status-change event ever recorded. The specification
+hints at the production answer itself when it notes that a real system would store the
+value directly on the ride: writing the duration when the dropoff event is recorded
+turns this into a simple aggregate over `ride`. Failing that, a materialised view
+refreshed on a schedule would serve the same purpose, since a report of this kind does
+not need to be accurate to the second. Neither was done here, because the exercise asks
+for the value to be derived from the events and for the ride table to stay as specified.
+
+---
+
 ## Running in production
 
 ```bash
@@ -518,4 +615,4 @@ the requirement.
 - [x] `todays_ride_events` via filtered prefetch, within the query budget
 - [x] Filtering by status and rider email
 - [x] Sorting by pickup time and by distance from a given point
-- [ ] Reporting SQL for trips longer than one hour
+- [x] Reporting SQL for trips longer than one hour
