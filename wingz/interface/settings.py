@@ -8,8 +8,13 @@ WINGZ_INTERFACE_INSTALLED_APPS = [
 ]
 
 REST_FRAMEWORK = {
+    # JWT is the authentication method for API clients. SessionAuthentication is
+    # additionally accepted so that a user already logged into /admin/ can browse the
+    # API through DRF's browsable interface — convenient for exploring by hand, and it
+    # grants nothing extra, since IsAdminRole still applies either way.
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
     ],
     # Every endpoint is admin-only by default; the permission is declared once here
     # rather than repeated on each ViewSet, so a new endpoint cannot accidentally

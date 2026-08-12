@@ -4,8 +4,14 @@ from django.db.models import Prefetch
 from django.utils import timezone
 from rest_framework import viewsets
 
+from wingz.domain.core.models import User
 from wingz.domain.rides.models import Ride, RideEvent
-from wingz.interface.rest.serializers import RideReadSerializer, RideWriteSerializer
+from wingz.interface.rest.serializers import (
+    RideEventSerializer,
+    RideReadSerializer,
+    RideWriteSerializer,
+    UserSerializer,
+)
 
 # The window of ride events exposed as `todays_ride_events`.
 TODAYS_EVENTS_WINDOW = timedelta(hours=24)
@@ -62,3 +68,26 @@ class RideViewSet(viewsets.ModelViewSet):
         recent_events = RideEvent.objects.filter(created_at__gte=cutoff).order_by("-created_at")
 
         return Prefetch("ride_events", queryset=recent_events, to_attr="todays_ride_events")
+
+
+class UserViewSet(viewsets.ModelViewSet):
+    """CRUD for users.
+
+    Ordering is explicit for the same reason the ride list orders explicitly: without
+    it, pagination over an unordered queryset is not stable.
+    """
+
+    serializer_class = UserSerializer
+    queryset = User.objects.all().order_by("id_user")
+
+
+class RideEventViewSet(viewsets.ModelViewSet):
+    """CRUD for ride events.
+
+    The list is ordered newest first, which is the useful default for an event log,
+    with the primary key as a tiebreaker since events recorded in the same instant
+    would otherwise have no defined order.
+    """
+
+    serializer_class = RideEventSerializer
+    queryset = RideEvent.objects.select_related("id_ride").order_by("-created_at", "-id_ride_event")

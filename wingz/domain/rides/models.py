@@ -1,6 +1,11 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
+
+# WGS 84 bounds. Anything outside these is not a location on Earth.
+LATITUDE_VALIDATORS = [MinValueValidator(-90.0), MaxValueValidator(90.0)]
+LONGITUDE_VALIDATORS = [MinValueValidator(-180.0), MaxValueValidator(180.0)]
 
 
 class Ride(models.Model):
@@ -30,14 +35,31 @@ class Ride(models.Model):
         db_column="id_driver",
         related_name="rides_as_driver",
     )
-    pickup_latitude = models.FloatField()
-    pickup_longitude = models.FloatField()
-    dropoff_latitude = models.FloatField()
-    dropoff_longitude = models.FloatField()
+    pickup_latitude = models.FloatField(validators=LATITUDE_VALIDATORS)
+    pickup_longitude = models.FloatField(validators=LONGITUDE_VALIDATORS)
+    dropoff_latitude = models.FloatField(validators=LATITUDE_VALIDATORS)
+    dropoff_longitude = models.FloatField(validators=LONGITUDE_VALIDATORS)
     pickup_time = models.DateTimeField()
 
     class Meta:
         db_table = "ride"
+        constraints = [
+            # The field validators above give the API a readable 400 response, but they
+            # only run through forms and serializers — Model.save() does not call them.
+            # These constraints make the guarantee unconditional: no code path, including
+            # bulk_create, raw ORM writes or a psql session, can store a coordinate that
+            # is not a point on Earth.
+            models.CheckConstraint(
+                condition=models.Q(pickup_latitude__gte=-90.0, pickup_latitude__lte=90.0)
+                & models.Q(pickup_longitude__gte=-180.0, pickup_longitude__lte=180.0),
+                name="ride_pickup_coordinates_within_earth",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(dropoff_latitude__gte=-90.0, dropoff_latitude__lte=90.0)
+                & models.Q(dropoff_longitude__gte=-180.0, dropoff_longitude__lte=180.0),
+                name="ride_dropoff_coordinates_within_earth",
+            ),
+        ]
         indexes = [
             # Sorting by pickup_time is one of the two supported orderings, and the
             # common case is a status filter combined with that sort — so the composite

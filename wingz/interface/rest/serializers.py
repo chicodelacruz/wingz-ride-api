@@ -1,3 +1,4 @@
+from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from wingz.domain.core.models import User
@@ -17,11 +18,63 @@ class RideUserSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class UserSerializer(serializers.ModelSerializer):
+    """Full representation for the user endpoint.
+
+    Distinct from RideUserSerializer, which is the read-only view embedded in a ride.
+    This one accepts writes, so it has to deal with passwords: write-only on the way
+    in, hashed through the manager rather than assigned to the field, and never
+    present on the way out.
+    """
+
+    password = serializers.CharField(
+        write_only=True,
+        required=False,
+        style={"input_type": "password"},
+        validators=[validate_password],
+    )
+
+    class Meta:
+        model = User
+        fields = [
+            "id_user",
+            "role",
+            "first_name",
+            "last_name",
+            "email",
+            "phone_number",
+            "password",
+            "is_active",
+        ]
+        read_only_fields = ["id_user"]
+
+    def create(self, validated_data):
+        password = validated_data.pop("password", None)
+        return User.objects.create_user(password=password, **validated_data)
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+        user = super().update(instance, validated_data)
+
+        if password:
+            user.set_password(password)
+            user.save(update_fields=["password"])
+
+        return user
+
+
 class RideEventSerializer(serializers.ModelSerializer):
+    """Ride event representation.
+
+    Writable, so the ride event endpoint can create and update events. Where it is
+    embedded in a ride it is declared read_only by the parent serializer, so writes
+    are not reachable through that path.
+    """
+
     class Meta:
         model = RideEvent
         fields = ["id_ride_event", "id_ride", "description", "created_at"]
-        read_only_fields = fields
+        read_only_fields = ["id_ride_event"]
 
 
 class RideReadSerializer(serializers.ModelSerializer):

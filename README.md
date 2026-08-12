@@ -34,8 +34,8 @@ python3 -m venv venv
 ./venv/bin/python -m pip install -r requirements/development.txt
 ```
 
-For a production install use `requirements/common.txt`, which omits the test and
-linting tools.
+`requirements/common.txt` holds the runtime dependencies alone; `production.txt` adds
+a WSGI server. See [Running in production](#running-in-production).
 
 **3. Configure the environment**
 
@@ -77,11 +77,38 @@ before the API is usable. `createsuperuser` assigns that role automatically.
 You will be prompted for **email**, **first name**, **last name**, and a password —
 there is no username field, since the specification's User table does not have one.
 
-**6. Run the server**
+**6. Load demonstration data (optional)**
+
+The API is easier to evaluate with data in it. This creates users, rides and ride
+events, including trips either side of the one-hour mark so the reporting query has
+something to separate, and events either side of the 24-hour mark so
+`todays_ride_events` is neither always empty nor always populated.
+
+```bash
+./venv/bin/python manage.py seed_demo_data --clear --rides 60
+```
+
+It prints the demo administrator's credentials when it finishes. The random generator
+is seeded, so repeated runs produce identical data. Without `--clear` it adds to
+whatever is already there rather than replacing it, and says so.
+
+> **Development only.** This command deletes ride data and creates an administrator
+> whose password is committed to this repository. It refuses to run when `DEBUG` is
+> `False` unless explicitly overridden, so it cannot be pointed at a deployment by
+> accident.
+
+**7. Run the server**
 
 ```bash
 ./venv/bin/python manage.py runserver 127.0.0.1:9094
 ```
+
+Two ways to explore it by hand:
+
+- `http://127.0.0.1:9094/admin/` — rides, events and users, with events shown inline
+  on each ride
+- `http://127.0.0.1:9094/api/rides/` — DRF's browsable API, usable in the browser once
+  you are logged into the admin
 
 ---
 
@@ -108,6 +135,53 @@ are not exercised by pytest — verify those separately against a clean database
 dropdb --if-exists wingz_verify && createdb wingz_verify
 WINGZ_DB_NAME=wingz_verify ./venv/bin/python manage.py migrate
 ```
+
+---
+
+## Running in production
+
+```bash
+./venv/bin/python -m pip install -r requirements/production.txt
+
+export WINGZ_SECRET_KEY="$(python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())')"
+export WINGZ_ALLOWED_HOSTS="api.example.com"
+
+./venv/bin/python manage.py migrate --settings=wingz.settings.production
+./venv/bin/python manage.py collectstatic --noinput --settings=wingz.settings.production
+./venv/bin/gunicorn wingz.wsgi:application --bind 0.0.0.0:8000
+```
+
+`wingz.settings.production` has no permissive defaults. `WINGZ_SECRET_KEY` and
+`WINGZ_ALLOWED_HOSTS` raise `ImproperlyConfigured` at startup if unset — a deployment
+that refuses to boot is better than one silently running on a development secret. It
+also enables HSTS, SSL redirection and secure cookies, restricts the API to the JSON
+renderer (the browsable API is a development convenience and needless attack surface
+in production), reuses database connections, and logs to stdout.
+
+Verify the configuration with Django's own deployment checklist:
+
+```bash
+./venv/bin/python manage.py check --deploy --settings=wingz.settings.production
+```
+
+This currently reports no issues.
+
+### A note on the constraint migration
+
+`0002_add_coordinate_constraints` adds two `CHECK` constraints. PostgreSQL takes an
+`ACCESS EXCLUSIVE` lock and scans the whole table to validate them, which is
+instantaneous on an empty table and an outage on the very large ride table this
+specification describes. Against an existing large table the safe form is two steps:
+
+```sql
+ALTER TABLE ride ADD CONSTRAINT ... CHECK (...) NOT VALID;  -- instant, no scan
+ALTER TABLE ride VALIDATE CONSTRAINT ...;                   -- scans under a weaker lock
+```
+
+The second statement takes `SHARE UPDATE EXCLUSIVE`, which does not block reads or
+writes. The migration here uses the plain form deliberately: the table is created in
+the same migration run, so there is nothing to scan and the two-step version would add
+complexity for no benefit.
 
 ---
 
@@ -159,6 +233,10 @@ Returns `access` and `refresh` tokens. Send the access token as
 | `GET` | `/api/rides/{id}/` | Retrieve a single ride |
 | `PUT` / `PATCH` | `/api/rides/{id}/` | Update a ride |
 | `DELETE` | `/api/rides/{id}/` | Delete a ride |
+| `GET` `POST` | `/api/ride-events/` | List (newest first) and create ride events |
+| `GET` `PUT` `PATCH` `DELETE` | `/api/ride-events/{id}/` | Retrieve, update, delete a ride event |
+| `GET` `POST` | `/api/users/` | List and create users |
+| `GET` `PUT` `PATCH` `DELETE` | `/api/users/{id}/` | Retrieve, update, delete a user |
 
 ### Ride list
 
@@ -316,6 +394,22 @@ queryset can show a row on two pages or skip it entirely. The ordering is
 `(-pickup_time, -id_ride)`; the id tiebreaker is required because `pickup_time` is not
 unique.
 
+**Coordinates are validated in two places, on purpose.**
+Field validators give the API a readable `400` naming the offending field. Database
+`CheckConstraint`s enforce the same bounds unconditionally. Both are needed because
+they cover different things: Django does not run field validators on `save()`, so the
+validators alone would leave `bulk_create`, data migrations and psql sessions free to
+store a latitude of 999 — which for a transport product is bad data that outlives the
+request that created it. The constraints alone would work, but would surface as an
+opaque `IntegrityError` instead of a useful error message.
+
+**Passwords are write-only and never assigned directly.**
+`UserSerializer` accepts a password on the way in, runs it through Django's configured
+password validators, hashes it via the manager, and never includes it on the way out.
+The separate `RideUserSerializer` used for the participants embedded in a ride exposes
+only the six fields the specification lists, so account fields cannot leak through the
+ride list.
+
 **`ATOMIC_REQUESTS` is enabled, which complicates query counting.**
 Each request runs in a transaction, so a failed write leaves nothing half-applied.
 The side effect is that Django's `assertNumQueries` counts the `SAVEPOINT` and
@@ -333,6 +427,9 @@ the requirement.
 - [x] `User`, `Ride`, `RideEvent` models with spec-conformant columns and indexes
 - [x] JWT authentication and admin-role authorisation
 - [x] Test harness, linting, query-counting helper
+- [x] Coordinate validation at the API and database levels
+- [x] Django admin for rides, events and users
+- [x] Demonstration data command
 - [x] Serializers and ViewSets for CRUD
 - [x] Ride list endpoint with nested rider, driver, and events
 - [x] `todays_ride_events` via filtered prefetch, within the query budget
